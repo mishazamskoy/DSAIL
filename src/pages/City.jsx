@@ -6,8 +6,11 @@ import { OrbitControls, Sky } from '@react-three/drei'
 import { supabase } from '../lib/supabase'
 import {
   createInitialMap, GRID_SIZE, CELL,
-  STRUCTURE_SLOTS, CASTLE_ROW, CASTLE_COL, CASTLE_SPAN, grassShade,
+  CASTLE_ROW, CASTLE_COL, CASTLE_SPAN, grassShade,
 } from '../game/mapData'
+
+// Baseline map — used to distinguish original roads from user-placed ones
+const ORIGINAL_MAP = createInitialMap()
 
 // ─── Game data ────────────────────────────────────────────────────────────────
 
@@ -16,60 +19,170 @@ const STRUCTURES = [
     id: 'granary',
     name: 'Granary',
     emoji: '🌾',
+    renderIcon: () => <GranaryIcon />,
     desc: 'Stores food for your growing city.',
     cost: { wood: 20, food: 0, knowledge: 0 },
+    generates: [{ icon: '🌾', value: 10, label: 'grain' }],
+  },
+  {
+    id: 'market',
+    name: 'Market',
+    emoji: '🏪',
+    renderIcon: () => <MarketIcon />,
+    desc: 'A bustling market that drives trade.',
+    cost: { food: 20, wood: 0, knowledge: 0 },
+    generates: [{ icon: '💰', value: 10, label: 'money' }],
+  },
+  {
+    id: 'house',
+    name: 'House',
+    emoji: '🏠',
+    renderIcon: () => <HouseIcon />,
+    desc: 'A medieval home with a backyard farm.',
+    cost: { wood: 20, food: 0, knowledge: 0 },
+    generates: [{ icon: '👥', value: 4, label: 'population' }],
   },
 ]
 
 const GRASS_HEX = ['#166534', '#15803d', '#14532d']
 
+// Lane indices: 1..16 (the cells directly adjacent to each wall side)
+const LANE = Array.from({ length: GRID_SIZE - 2 }, (_, i) => i + 1) // [1..16]
+const LAST  = GRID_SIZE - 1 // 17
+
+/**
+ * When an entire lane outside a wall side is purchased, move that wall outward.
+ * Only WALL→EMPTY and GRASS/EMPTY→WALL conversions are made; roads etc. are untouched.
+ */
+function applyWallExpansions(map, purchasedTerritory) {
+  const topDone    = LANE.every(c => purchasedTerritory.has(`0,${c}`))
+  const bottomDone = LANE.every(c => purchasedTerritory.has(`${LAST},${c}`))
+  const leftDone   = LANE.every(r => purchasedTerritory.has(`${r},0`))
+  const rightDone  = LANE.every(r => purchasedTerritory.has(`${r},${LAST}`))
+
+  if (!topDone && !bottomDone && !leftDone && !rightDone) return map
+
+  const next = map.map(row => row.map(cell => ({ ...cell })))
+
+  if (topDone) {
+    LANE.forEach(c => { next[0][c].type = CELL.WALL })
+    LANE.forEach(c => { if (next[1][c].type === CELL.WALL) next[1][c].type = CELL.EMPTY })
+    if (!leftDone)  next[1][1].type  = CELL.WALL   // keep corner until left expands
+    if (!rightDone) next[1][LAST - 1].type = CELL.WALL
+  }
+  if (bottomDone) {
+    LANE.forEach(c => { next[LAST][c].type = CELL.WALL })
+    // Carry the gate opening (ROAD cells in old south wall) into the new wall row
+    LANE.forEach(c => { if (next[LAST - 1][c].type === CELL.ROAD) next[LAST][c].type = CELL.ROAD })
+    LANE.forEach(c => { if (next[LAST - 1][c].type === CELL.WALL) next[LAST - 1][c].type = CELL.EMPTY })
+    if (!leftDone)  next[LAST - 1][1].type  = CELL.WALL
+    if (!rightDone) next[LAST - 1][LAST - 1].type = CELL.WALL
+  }
+  if (leftDone) {
+    LANE.forEach(r => { next[r][0].type = CELL.WALL })
+    LANE.forEach(r => { if (next[r][1].type === CELL.WALL) next[r][1].type = CELL.EMPTY })
+    if (!topDone)    next[1][1].type  = CELL.WALL
+    if (!bottomDone) next[LAST - 1][1].type = CELL.WALL
+  }
+  if (rightDone) {
+    LANE.forEach(r => { next[r][LAST].type = CELL.WALL })
+    LANE.forEach(r => { if (next[r][LAST - 1].type === CELL.WALL) next[r][LAST - 1].type = CELL.EMPTY })
+    if (!topDone)    next[1][LAST - 1].type  = CELL.WALL
+    if (!bottomDone) next[LAST - 1][LAST - 1].type = CELL.WALL
+  }
+
+  // Fill outer corners when both adjacent sides expand
+  if (topDone && leftDone)     next[0][0].type        = CELL.WALL
+  if (topDone && rightDone)    next[0][LAST].type     = CELL.WALL
+  if (bottomDone && leftDone)  next[LAST][0].type     = CELL.WALL
+  if (bottomDone && rightDone) next[LAST][LAST].type  = CELL.WALL
+
+  return next
+}
+
 // cell (r, c) → world [x, y, z] center at ground level
 function cellWorld(r, c) { return [c - 8.5, 0, r - 8.5] }
 
-// 2×2 slot top-left (sr, sc) → world center
-function slotWorld(sr, sc) { return [sc - 8, 0, sr - 8] }
+// Centre of a 2×2 footprint whose top-left is (r, c)
+function footprintCenter(r, c) { return [c - 8, 0, r - 8] }
+
+// If (r,c) falls inside any built structure's 2×2 footprint, return { structId, key }
+// A structure with top-left (sr,sc) covers (sr,sc),(sr,sc+1),(sr+1,sc),(sr+1,sc+1)
+// So (r,c) is covered if there's a structure at any of (r,c),(r-1,c),(r,c-1),(r-1,c-1)
+function getOccupant(r, c, builtStructures) {
+  for (const dr of [0, 1]) {
+    for (const dc of [0, 1]) {
+      const key = `${r - dr},${c - dc}`
+      const structId = builtStructures[key]
+      if (structId) return { structId, key }
+    }
+  }
+  return undefined
+}
 
 // ─── Ground tile ───────────────────────────────────────────────────────────────
 
-function GroundTile({ cell, builtId, selected, onCellClick }) {
+function GroundTile({ cell, builtId, selected, isValidBuild, isPickedUp, purchasable, onCellClick, onCellHover }) {
   const r = cell._r, c = cell._c
   const [wx, , wz] = cellWorld(r, c)
+
+  const isDemolishMode = selected === 'demolish'
+  const isMoveMode     = selected === 'move'
+  const isDemolishable = isDemolishMode && (!!builtId || cell.type === CELL.ROAD)
+  const isBuildMode    = !!selected && !['road', 'demolish', 'expand', 'move'].includes(selected)
 
   let color, height, emissive = '#000000', emissiveIntensity = 0
 
   switch (cell.type) {
     case CELL.GRASS:
-      color = GRASS_HEX[grassShade(r, c)]; height = 0.12; break
+      color = GRASS_HEX[grassShade(r, c)]; height = 0.12
+      if (purchasable) { emissive = '#d97706'; emissiveIntensity = 0.45 }
+      break
     case CELL.WALL:
       color = '#9ca3af'; height = 2.0; break
     case CELL.EMPTY:
-      color = '#c8a97e'; height = 0.12; break
-    case CELL.ROAD:
-      color = '#57534e'; height = 0.14; break
-    case CELL.CASTLE:
-      color = '#334155'; height = 0.12; break
-    case CELL.SLOT:
-      if (builtId) { color = '#78350f'; height = 0.12 }
-      else if (selected && selected !== 'road') {
-        color = '#fbbf24'; height = 0.20
-        emissive = '#d97706'; emissiveIntensity = 0.35
+      if (builtId) {
+        color = '#78350f'; height = 0.12
+        if (isDemolishable)                { emissive = '#ef4444'; emissiveIntensity = 0.6  }
+        else if (isMoveMode && isPickedUp) { emissive = '#f97316'; emissiveIntensity = 0.65 }
+        else if (isMoveMode)               { emissive = '#06b6d4'; emissiveIntensity = 0.45 }
+      } else if (isMoveMode && isValidBuild) {
+        color = '#14532d'; height = 0.18
+        emissive = '#16a34a'; emissiveIntensity = 0.4
+      } else if (isBuildMode && isValidBuild) {
+        color = '#fbbf24'; height = 0.18
+        emissive = '#d97706'; emissiveIntensity = 0.25
       } else {
-        color = '#b45309'; height = 0.16
+        color = '#c8a97e'; height = 0.12
       }
       break
+    case CELL.ROAD:
+      color = '#57534e'; height = 0.14
+      if (isDemolishable) { emissive = '#7f1d1d'; emissiveIntensity = 0.5 }
+      break
+    case CELL.CASTLE:
+      color = '#334155'; height = 0.12; break
     default:
       color = '#15803d'; height = 0.12
   }
 
   const clickable =
-    (cell.type === CELL.SLOT && !builtId && selected && selected !== 'road') ||
-    (cell.type === CELL.EMPTY && selected === 'road')
+    (cell.type === CELL.EMPTY && !builtId && isBuildMode && isValidBuild) ||
+    (cell.type === CELL.EMPTY && !builtId && selected === 'road') ||
+    isDemolishable ||
+    (selected === 'expand' && purchasable) ||
+    (isMoveMode && !!builtId) ||
+    (isMoveMode && !builtId && isValidBuild)
 
   return (
     <mesh
       position={[wx, height / 2, wz]}
       onClick={clickable ? e => { e.stopPropagation(); onCellClick(r, c) } : undefined}
-      onPointerEnter={clickable ? e => { e.stopPropagation(); e.object.material.emissiveIntensity = emissiveIntensity + 0.3 } : undefined}
+      onPointerEnter={e => {
+        e.stopPropagation()
+        onCellHover(r, c)
+        if (clickable) e.object.material.emissiveIntensity = emissiveIntensity + 0.3
+      }}
       onPointerLeave={clickable ? e => { e.object.material.emissiveIntensity = emissiveIntensity } : undefined}
     >
       <boxGeometry args={[0.97, height, 0.97]} />
@@ -83,9 +196,34 @@ function GroundTile({ cell, builtId, selected, onCellClick }) {
   )
 }
 
+// ─── Ghost footprint (move mode placement preview) ────────────────────────────
+
+function GhostFootprint({ r, c, isValid }) {
+  if (r + 1 >= GRID_SIZE || c + 1 >= GRID_SIZE) return null
+  const color = isValid ? '#4ade80' : '#9ca3af'
+  return (
+    <>
+      {[[r,c],[r,c+1],[r+1,c],[r+1,c+1]].map(([tr, tc]) => {
+        const [wx, , wz] = cellWorld(tr, tc)
+        return (
+          <mesh key={`ghost-${tr}-${tc}`} position={[wx, 0.32, wz]}>
+            <boxGeometry args={[0.97, 0.28, 0.97]} />
+            <meshStandardMaterial
+              color={color}
+              transparent
+              opacity={0.48}
+              depthWrite={false}
+            />
+          </mesh>
+        )
+      })}
+    </>
+  )
+}
+
 // ─── Surrounding grass tiles ──────────────────────────────────────────────────
 
-const GRASS_PADDING = 10
+const GRASS_PADDING = 30
 
 function SurroundingGrass() {
   const ref = useRef()
@@ -320,18 +458,216 @@ function Granary3D({ cx, cz }) {
   )
 }
 
+// ─── Market 3D ────────────────────────────────────────────────────────────────
+// Open-air market stall: canopy over a produce-laden counter, back storage wall
+
+function Market3D({ cx, cz }) {
+  const WOOD     = '#92400e'
+  const WOOD_LT  = '#b45309'
+  const CANOPY_R = '#dc2626'  // red stripe
+  const CANOPY_W = '#fef9c3'  // cream stripe
+  const BASE     = '#d6cfc4'
+
+  return (
+    <group position={[cx, 0, cz]}>
+      {/* Stone base */}
+      <Block pos={[0, 0.07, 0]} size={[1.9, 0.14, 1.9]} color={BASE} roughness={0.9} />
+
+      {/* ── Back storage wall ── */}
+      <Block pos={[0, 0.7, -0.72]} size={[1.7, 1.26, 0.14]} color={WOOD_LT} roughness={0.85} />
+
+      {/* Back shelf */}
+      <Block pos={[0, 0.88, -0.64]} size={[1.5, 0.07, 0.2]} color={WOOD} roughness={0.8} />
+      {/* Shelf items: small crates / pots */}
+      {[-0.55, -0.22, 0.12, 0.45].map((ox, i) => (
+        <Block key={`crate${i}`} pos={[ox, 0.98, -0.62]} size={[0.22, 0.17, 0.16]}
+          color={i % 2 === 0 ? '#78350f' : '#a16207'} roughness={0.85} />
+      ))}
+
+      {/* ── Four support posts ── */}
+      {[-0.68, 0.68].map(ox =>
+        [-0.55, 0.62].map(oz => (
+          <mesh key={`${ox}-${oz}`} position={[ox, 0.65, oz]} castShadow>
+            <cylinderGeometry args={[0.055, 0.055, 1.16, 7]} />
+            <meshStandardMaterial color={WOOD} roughness={0.8} />
+          </mesh>
+        ))
+      )}
+
+      {/* ── Red-and-cream striped canopy ── */}
+      {[-0.6, -0.2, 0.2, 0.6].map((ox, i) => (
+        <Block key={`can${i}`} pos={[ox, 1.25, 0.04]}
+          size={[0.38, 0.07, 1.4]}
+          color={i % 2 === 0 ? CANOPY_R : CANOPY_W} roughness={0.65} />
+      ))}
+      {/* Canopy front valance (scalloped suggestion) */}
+      <Block pos={[0, 1.2, 0.76]} size={[1.56, 0.12, 0.06]} color={CANOPY_R} roughness={0.65} />
+      {[-0.52, -0.17, 0.17, 0.52].map((ox, i) => (
+        <Block key={`val${i}`} pos={[ox, 1.14, 0.76]} size={[0.22, 0.12, 0.06]}
+          color={i % 2 === 0 ? CANOPY_R : CANOPY_W} roughness={0.65} />
+      ))}
+
+      {/* ── Counter ── */}
+      <Block pos={[0, 0.58, 0.55]} size={[1.5, 0.1, 0.44]} color={WOOD} roughness={0.8} />  {/* top */}
+      <Block pos={[0, 0.29, 0.55]} size={[1.5, 0.46, 0.1]} color={WOOD_LT} roughness={0.85} /> {/* face */}
+      {/* Counter legs */}
+      {[-0.64, 0.64].map(ox => (
+        <Block key={`leg${ox}`} pos={[ox, 0.29, 0.52]} size={[0.1, 0.46, 0.38]} color={WOOD} roughness={0.8} />
+      ))}
+
+      {/* ── Produce on counter ── */}
+      {/* Red apples */}
+      {[-0.62, -0.44].map((ox, i) => (
+        <mesh key={`apple${i}`} position={[ox, 0.69, 0.52]} castShadow>
+          <sphereGeometry args={[0.095, 8, 6]} />
+          <meshStandardMaterial color="#dc2626" roughness={0.55} />
+        </mesh>
+      ))}
+      {/* Oranges */}
+      {[-0.18, 0.0].map((ox, i) => (
+        <mesh key={`orange${i}`} position={[ox, 0.69, 0.52]} castShadow>
+          <sphereGeometry args={[0.095, 8, 6]} />
+          <meshStandardMaterial color="#f97316" roughness={0.55} />
+        </mesh>
+      ))}
+      {/* Yellow lemons */}
+      {[0.22, 0.38].map((ox, i) => (
+        <mesh key={`lemon${i}`} position={[ox, 0.68, 0.52]} castShadow>
+          <sphereGeometry args={[0.08, 8, 6]} />
+          <meshStandardMaterial color="#eab308" roughness={0.55} />
+        </mesh>
+      ))}
+      {/* Purple grapes cluster */}
+      {[0.6, 0.68, 0.64].map((ox, i) => (
+        <mesh key={`grape${i}`} position={[ox, 0.66 + i * 0.04, 0.5 + (i % 2) * 0.06]} castShadow>
+          <sphereGeometry args={[0.07, 7, 6]} />
+          <meshStandardMaterial color="#7c3aed" roughness={0.5} />
+        </mesh>
+      ))}
+      {/* Meat slab (pink-red) */}
+      <Block pos={[-0.62, 0.645, 0.62]} size={[0.24, 0.07, 0.16]} color="#db2777" roughness={0.65} />
+      {/* Second meat cut */}
+      <Block pos={[-0.34, 0.645, 0.62]} size={[0.2, 0.07, 0.14]} color="#be123c" roughness={0.65} />
+    </group>
+  )
+}
+
+// ─── House 3D ─────────────────────────────────────────────────────────────────
+// Medieval half-timbered house (front) + fenced backyard farm (rear)
+
+function House3D({ cx, cz }) {
+  const PLASTER = '#ede8de'   // cream plaster
+  const TIMBER  = '#2d1a0a'   // very dark brown beams
+  const ROOF    = '#3b2a1e'   // dark roof tiles
+  const CHIMNEY = '#9ca3af'   // stone
+  const DOOR    = '#78350f'   // brown door
+  const GLASS   = '#1e293b'   // window glass
+  const SOIL    = '#713f12'   // farm soil
+  const CROP    = '#16a34a'   // crop shoots
+  const FENCE   = '#b45309'   // fence wood
+  const BASE    = '#d6cfc4'   // foundation stone
+
+  // House: 1.3 wide × 0.85 deep, centered at z=+0.18 → front face at z=+0.605, back at z=−0.245
+  // Farm:  behind house,  z = −0.38 to −0.85
+  // Fence: z = −0.30
+
+  const HZ = 0.18   // house centre z
+  const HW = 1.3    // house width
+  const HD = 0.85   // house depth
+  const WH = 0.92   // wall height (y: 0.14 → 1.06)
+  const FZ = HZ + HD / 2  // front face z = 0.605
+
+  return (
+    <group position={[cx, 0, cz]}>
+      {/* Stone foundation */}
+      <Block pos={[0, 0.07, 0]} size={[1.88, 0.14, 1.88]} color={BASE} roughness={0.95} />
+
+      {/* ── Plaster walls ── */}
+      <Block pos={[0, 0.14 + WH / 2, HZ]} size={[HW, WH, HD]} color={PLASTER} roughness={0.78} />
+
+      {/* ── Timber frame on front face ── */}
+      {/* Horizontal rails */}
+      {[0.17, 0.65, 1.04].map((y, i) => (
+        <Block key={`hf${i}`} pos={[0, y, FZ + 0.01]} size={[HW, 0.065, 0.055]} color={TIMBER} roughness={0.85} />
+      ))}
+      {/* Vertical studs */}
+      {[-0.54, -0.05, 0.44].map((ox, i) => (
+        <Block key={`vf${i}`} pos={[ox, 0.14 + WH / 2, FZ + 0.01]} size={[0.065, WH, 0.055]} color={TIMBER} roughness={0.85} />
+      ))}
+      {/* Diagonal brace (top-left panel) */}
+      <mesh position={[-0.295, 0.855, FZ + 0.015]} rotation={[0, 0, -Math.PI / 4]} castShadow>
+        <boxGeometry args={[0.065, 0.42, 0.05]} />
+        <meshStandardMaterial color={TIMBER} roughness={0.85} />
+      </mesh>
+
+      {/* ── Timber frame on side faces (x = ±0.65) ── */}
+      {[1, -1].map(s => (
+        <Block key={`hs${s}`} pos={[s * 0.651, 0.65, HZ]} size={[0.055, WH, HD]} color={TIMBER} roughness={0.85} />
+      ))}
+
+      {/* ── Pyramid roof ── */}
+      <mesh position={[0, 1.06 + 0.38, HZ]} rotation={[0, Math.PI / 4, 0]} castShadow>
+        <coneGeometry args={[0.82, 0.76, 4]} />
+        <meshStandardMaterial color={ROOF} roughness={0.88} />
+      </mesh>
+      {/* Eave trim */}
+      <Block pos={[0, 1.08, HZ]} size={[HW + 0.14, 0.08, HD + 0.14]} color={TIMBER} roughness={0.85} />
+
+      {/* ── Chimney ── */}
+      <Block pos={[0.34, 1.50, HZ - 0.1]} size={[0.19, 0.92, 0.19]} color={CHIMNEY} roughness={0.92} />
+      <Block pos={[0.34, 1.98, HZ - 0.1]} size={[0.25, 0.09, 0.25]} color="#6b7280" roughness={0.9} />
+
+      {/* ── Door ── */}
+      <Block pos={[-0.05, 0.47, FZ + 0.015]} size={[0.3, 0.66, 0.07]} color={DOOR} roughness={0.8} />
+
+      {/* ── Front windows ── */}
+      {[-0.44, 0.4].map((ox, i) => (
+        <Block key={`w${i}`} pos={[ox, 0.74, FZ + 0.015]} size={[0.24, 0.26, 0.06]}
+          color={GLASS} roughness={0.3} metalness={0.1} />
+      ))}
+
+      {/* ── Fence (separates house yard from farm) ── */}
+      {[-0.68, -0.23, 0.23, 0.68].map((ox, i) => (
+        <mesh key={`fp${i}`} position={[ox, 0.3, -0.30]} castShadow>
+          <cylinderGeometry args={[0.042, 0.042, 0.36, 6]} />
+          <meshStandardMaterial color={FENCE} roughness={0.85} />
+        </mesh>
+      ))}
+      <Block pos={[0, 0.37, -0.30]} size={[1.44, 0.065, 0.05]} color={FENCE} roughness={0.85} />
+      <Block pos={[0, 0.24, -0.30]} size={[1.44, 0.065, 0.05]} color={FENCE} roughness={0.85} />
+
+      {/* ── Farm soil plots ── */}
+      {[-0.46, 0.46].map((ox, i) => (
+        <Block key={`soil${i}`} pos={[ox, 0.17, -0.60]} size={[0.56, 0.08, 0.48]} color={SOIL} roughness={0.97} />
+      ))}
+
+      {/* ── Crop shoots on each plot ── */}
+      {[-0.46, 0.46].map((ox) =>
+        [-0.82, -0.66, -0.50, -0.38].map((oz, j) =>
+          [-0.16, 0, 0.16].map((dx, k) => (
+            <mesh key={`${ox}-${oz}-${dx}`} position={[ox + dx, 0.30, oz]}>
+              <boxGeometry args={[0.065, 0.18, 0.065]} />
+              <meshStandardMaterial color={k === 1 ? '#15803d' : CROP} roughness={0.8} />
+            </mesh>
+          ))
+        )
+      )}
+    </group>
+  )
+}
+
 // ─── City Gate 3D ─────────────────────────────────────────────────────────────
 // Positioned at the south wall opening: row 16 → world z = 7.5, cols 8-9 center → x = 0
 // Towers sit on wall tiles at cols 7 (x=-1.5) and 10 (x=1.5)
 
-function CityGate3D() {
+function CityGate3D({ gateZ = 7.5 }) {
   const STONE = '#9ca3af'  // matches city wall tiles
   const DARK  = '#6b7280'
   const VOID  = '#0f172a'
   const GATE_DOOR = '#78350f'
 
   return (
-    <group position={[0, 0, 7.5]}>
+    <group position={[0, 0, gateZ]}>
       {/* ── Left tower ── */}
       <Block pos={[-1.5, 1.75, 0]} size={[0.92, 3.5, 0.92]} color={STONE} roughness={0.9} />
       <Block pos={[-1.5, 3.58, 0]} size={[1.05, 0.18, 1.05]} color={DARK} />
@@ -376,7 +712,69 @@ function CityGate3D() {
 
 // ─── 3D scene ─────────────────────────────────────────────────────────────────
 
-function GameScene({ map, builtStructures, selected, onCellClick }) {
+function GameScene({ map, builtStructures, selected, movingStructure, purchasedTerritory, onCellClick }) {
+  // South wall Z: row 16 → 7.5 normally; row 17 → 8.5 when bottom lane complete
+  const gateZ = useMemo(
+    () => LANE.every(c => purchasedTerritory.has(`${LAST},${c}`)) ? 8.5 : 7.5,
+    [purchasedTerritory]
+  )
+
+  // Valid top-left positions for a 2×2 structure placement or move drop target
+  const validBuildCells = useMemo(() => {
+    if (!selected || ['road', 'demolish', 'expand'].includes(selected)) return null
+    // In move mode, only show drop targets once a structure is picked up
+    if (selected === 'move' && !movingStructure) return null
+
+    let fromFootprint = null
+    if (movingStructure) {
+      const [fr, fc] = movingStructure.fromKey.split(',').map(Number)
+      fromFootprint = new Set([
+        `${fr},${fc}`, `${fr},${fc+1}`, `${fr+1},${fc}`, `${fr+1},${fc+1}`
+      ])
+    }
+
+    const set = new Set()
+    for (let r = 0; r < GRID_SIZE - 1; r++) {
+      for (let c = 0; c < GRID_SIZE - 1; c++) {
+        const ok = [[r,c],[r,c+1],[r+1,c],[r+1,c+1]].every(([tr,tc]) => {
+          if (map[tr][tc].type !== CELL.EMPTY) return false
+          const occ = getOccupant(tr, tc, builtStructures)
+          return !occ || (fromFootprint && fromFootprint.has(`${tr},${tc}`))
+        })
+        if (ok) set.add(`${r},${c}`)
+      }
+    }
+    return set
+  }, [selected, map, builtStructures, movingStructure])
+
+  const pickedUpCells = useMemo(() => {
+    if (!movingStructure) return null
+    const [fr, fc] = movingStructure.fromKey.split(',').map(Number)
+    return new Set([`${fr},${fc}`, `${fr},${fc+1}`, `${fr+1},${fc}`, `${fr+1},${fc+1}`])
+  }, [movingStructure])
+
+  const [hoverCell, setHoverCell] = useState(null)
+  const onCellHover = useCallback((r, c) => setHoverCell({ r, c }), [])
+
+  const purchasableCells = useMemo(() => {
+    if (selected !== 'expand') return null
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1]]
+    const set = new Set()
+    for (let r = 0; r < GRID_SIZE; r++) {
+      for (let c = 0; c < GRID_SIZE; c++) {
+        if (map[r][c].type !== CELL.GRASS) continue
+        const adj = dirs.some(([dr, dc]) => {
+          const nr = r + dr, nc = c + dc
+          if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) return false
+          const nt = map[nr][nc].type
+          return nt === CELL.WALL || nt === CELL.EMPTY || nt === CELL.ROAD
+        })
+        if (adj) set.add(`${r},${c}`)
+      }
+    }
+    return set
+  }, [selected, map])
+
   return (
     <>
       <ambientLight intensity={0.65} />
@@ -423,9 +821,13 @@ function GameScene({ map, builtStructures, selected, onCellClick }) {
           <GroundTile
             key={`${r}-${c}`}
             cell={cell}
-            builtId={cell.slotId != null ? builtStructures[cell.slotId] : undefined}
+            builtId={getOccupant(r, c, builtStructures)?.structId}
             selected={selected}
+            isValidBuild={validBuildCells?.has(`${r},${c}`) ?? false}
+            isPickedUp={pickedUpCells?.has(`${r},${c}`) ?? false}
+            purchasable={purchasableCells?.has(`${r},${c}`) ?? false}
             onCellClick={onCellClick}
+            onCellHover={onCellHover}
           />
         ))
       )}
@@ -433,14 +835,25 @@ function GameScene({ map, builtStructures, selected, onCellClick }) {
       {/* Castle */}
       <Castle3D />
 
-      {/* City gate at the south wall */}
-      <CityGate3D />
+      {/* City gate — tracks the south wall */}
+      <CityGate3D gateZ={gateZ} />
+
+      {/* Ghost placement preview (move mode, phase 2) */}
+      {movingStructure && hoverCell && (
+        <GhostFootprint
+          r={hoverCell.r}
+          c={hoverCell.c}
+          isValid={validBuildCells?.has(`${hoverCell.r},${hoverCell.c}`) ?? false}
+        />
+      )}
 
       {/* Built structures */}
-      {Object.entries(builtStructures).map(([slotId, structId]) => {
-        const [sr, sc] = STRUCTURE_SLOTS[parseInt(slotId)]
-        const [cx, , cz] = slotWorld(sr, sc)
-        if (structId === 'granary') return <Granary3D key={slotId} cx={cx} cz={cz} />
+      {Object.entries(builtStructures).map(([cellKey, structId]) => {
+        const [cr, cc] = cellKey.split(',').map(Number)
+        const [cx, , cz] = footprintCenter(cr, cc)
+        if (structId === 'granary') return <Granary3D key={cellKey} cx={cx} cz={cz} />
+        if (structId === 'market')  return <Market3D  key={cellKey} cx={cx} cz={cz} />
+        if (structId === 'house')   return <House3D   key={cellKey} cx={cx} cz={cz} />
         return null
       })}
     </>
@@ -449,13 +862,81 @@ function GameScene({ map, builtStructures, selected, onCellClick }) {
 
 // ─── UI components ─────────────────────────────────────────────────────────────
 
-function Resource({ icon, label, value }) {
+function Resource({ icon, label, value, valueClass = '' }) {
   return (
     <div className="flex items-center gap-1.5">
       <span className="text-base leading-none">{icon}</span>
-      <span className="text-sm font-semibold tabular-nums">{value}</span>
+      <span className={`text-sm font-semibold tabular-nums ${valueClass}`}>{value}</span>
       <span className="hidden sm:inline text-xs text-slate-500">{label}</span>
     </div>
+  )
+}
+
+function MarketIcon() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Posts */}
+      <rect x="7" y="22" width="3" height="12" fill="#78350f" />
+      <rect x="30" y="22" width="3" height="12" fill="#78350f" />
+      {/* Counter */}
+      <rect x="6" y="30" width="28" height="4" rx="1" fill="#92400e" />
+      {/* Awning stripes */}
+      <clipPath id="awning-clip">
+        <polygon points="4,22 36,22 33,12 7,12" />
+      </clipPath>
+      <rect x="4" y="12" width="6" height="11" fill="#dc2626" clipPath="url(#awning-clip)" />
+      <rect x="10" y="12" width="6" height="11" fill="#fef3c7" clipPath="url(#awning-clip)" />
+      <rect x="16" y="12" width="6" height="11" fill="#dc2626" clipPath="url(#awning-clip)" />
+      <rect x="22" y="12" width="6" height="11" fill="#fef3c7" clipPath="url(#awning-clip)" />
+      <rect x="28" y="12" width="8" height="11" fill="#dc2626" clipPath="url(#awning-clip)" />
+      <polygon points="4,22 36,22 33,12 7,12" fill="none" stroke="#b91c1c" strokeWidth="0.8" />
+      {/* Produce on counter */}
+      <circle cx="12" cy="29" r="2" fill="#ef4444" />
+      <circle cx="17" cy="29" r="2" fill="#f97316" />
+      <circle cx="22" cy="29" r="2" fill="#eab308" />
+      <circle cx="27" cy="29" r="2" fill="#a855f7" />
+    </svg>
+  )
+}
+
+function GranaryIcon() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Walls */}
+      <rect x="8" y="20" width="24" height="16" fill="#f5f0e8" stroke="#d1c9b8" strokeWidth="0.8" />
+      {/* Roof */}
+      <polygon points="5,20 20,8 35,20" fill="#78350f" />
+      {/* Door */}
+      <rect x="16" y="28" width="8" height="8" rx="1" fill="#78350f" />
+      {/* Door arch top */}
+      <ellipse cx="20" cy="28" rx="4" ry="2.5" fill="#78350f" />
+      {/* Window */}
+      <rect x="10" y="22" width="5" height="5" rx="0.5" fill="#d1c9b8" stroke="#a09880" strokeWidth="0.5" />
+      <rect x="25" y="22" width="5" height="5" rx="0.5" fill="#d1c9b8" stroke="#a09880" strokeWidth="0.5" />
+    </svg>
+  )
+}
+
+function HouseIcon() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Walls */}
+      <rect x="8" y="20" width="22" height="16" fill="#ede8de" stroke="#d1c9b8" strokeWidth="0.8" />
+      {/* Timber framing */}
+      <line x1="8" y1="20" x2="30" y2="36" stroke="#2d1a0a" strokeWidth="1.2" />
+      <line x1="30" y1="20" x2="8" y2="36" stroke="#2d1a0a" strokeWidth="1.2" />
+      <line x1="8" y1="28" x2="30" y2="28" stroke="#2d1a0a" strokeWidth="1.2" />
+      {/* Roof */}
+      <polygon points="5,20 19,8 33,20" fill="#78350f" />
+      {/* Chimney */}
+      <rect x="24" y="10" width="4" height="8" fill="#6b5c4e" />
+      {/* Door */}
+      <rect x="16" y="28" width="7" height="8" rx="1" fill="#78350f" />
+      {/* Farm plot */}
+      <rect x="32" y="26" width="6" height="8" fill="#3d2b1f" rx="0.5" />
+      <line x1="35" y1="26" x2="35" y2="34" stroke="#22c55e" strokeWidth="1" />
+      <line x1="32" y1="30" x2="38" y2="30" stroke="#22c55e" strokeWidth="1" />
+    </svg>
   )
 }
 
@@ -469,19 +950,25 @@ function StructureCard({ structure, resources, selected, onSelect, onCancel }) {
     <div className={`flex items-center gap-4 p-4 rounded-xl border transition-colors ${
       isActive ? 'bg-amber-950 border-amber-600' : 'bg-slate-800 border-slate-700 hover:border-slate-600'
     }`}>
-      <span className="text-3xl shrink-0">{structure.emoji}</span>
+      <span className="shrink-0 w-10 h-10 flex items-center justify-center">
+        {structure.renderIcon ? structure.renderIcon() : <span className="text-3xl">{structure.emoji}</span>}
+      </span>
       <div className="flex-1 min-w-0">
         <p className="font-semibold text-white text-sm">{structure.name}</p>
         <p className="text-slate-400 text-xs mt-0.5 truncate">{structure.desc}</p>
         <div className="flex items-center gap-3 mt-1.5 text-xs">
-          {structure.cost.wood > 0 && (
-            <span className={structure.cost.wood > resources.wood ? 'text-red-400' : 'text-slate-300'}>
-              🪵 {structure.cost.wood}
+          {structure.cost.food      > 0 && <span className={structure.cost.food      > resources.food      ? 'text-red-400' : 'text-slate-300'}>🍎 {structure.cost.food}</span>}
+          {structure.cost.wood      > 0 && <span className={structure.cost.wood      > resources.wood      ? 'text-red-400' : 'text-slate-300'}>🪵 {structure.cost.wood}</span>}
+          {structure.cost.knowledge > 0 && <span className={structure.cost.knowledge > resources.knowledge ? 'text-red-400' : 'text-slate-300'}>📚 {structure.cost.knowledge}</span>}
+          {Object.values(structure.cost).every(v => v === 0) && <span className="text-slate-500">Free</span>}
+        </div>
+        <div className="flex items-center gap-3 mt-1 text-xs">
+          <span className="text-slate-600">Generates:</span>
+          {structure.generates.map(g => (
+            <span key={g.label} className="text-emerald-400 font-medium">
+              {g.icon} +{g.value} {g.label}
             </span>
-          )}
-          {Object.values(structure.cost).every(v => v === 0) && (
-            <span className="text-slate-500">Free</span>
-          )}
+          ))}
         </div>
       </div>
       {isActive ? (
@@ -514,10 +1001,18 @@ export default function City() {
     g.forEach((row, r) => row.forEach((cell, c) => { cell._r = r; cell._c = c }))
     return g
   })
-  const [resources, setResources]           = useState({ food: 0, knowledge: 0, wood: 0 })
+  const [resources, setResources]             = useState({ food: 0, knowledge: 0, wood: 0 })
   const [builtStructures, setBuiltStructures] = useState({})
-  const [activeTab, setActiveTab]           = useState('structures')
-  const [selected, setSelected]             = useState(null)
+  const [purchasedTerritory, setPurchasedTerritory] = useState(new Set())
+  const [activeTab, setActiveTab]             = useState('structures')
+  const [selected, setSelected]               = useState(null)
+  const [movingStructure, setMovingStructure] = useState(null) // { structId, fromKey } when picking up
+
+  // money = (markets × 10) − cells purchased
+  const money = useMemo(
+    () => 20 + Object.values(builtStructures).filter(id => id === 'market').length * 10 - purchasedTerritory.size,
+    [builtStructures, purchasedTerritory]
+  )
 
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data: { session } }) => {
@@ -525,7 +1020,7 @@ export default function City() {
       setUser(session.user)
       const uid = session.user.id
 
-      const [{ data: ud }, { data: structs }] = await Promise.all([
+      const [{ data: ud }, { data: structs }, { data: territory }, { data: roads }] = await Promise.all([
         supabase
           .from('user_data')
           .select('food_points, knowledge_points, wood_points')
@@ -533,7 +1028,15 @@ export default function City() {
           .maybeSingle(),
         supabase
           .from('city_structures')
-          .select('slot_id, structure_id')
+          .select('row_idx, col_idx, structure_id')
+          .eq('user_id', uid),
+        supabase
+          .from('city_territory')
+          .select('row_idx, col_idx')
+          .eq('user_id', uid),
+        supabase
+          .from('city_roads')
+          .select('row_idx, col_idx, placed')
           .eq('user_id', uid),
       ])
 
@@ -546,8 +1049,30 @@ export default function City() {
       }
       if (structs) {
         const built = {}
-        structs.forEach(s => { built[s.slot_id] = s.structure_id })
+        structs.forEach(s => { built[`${s.row_idx},${s.col_idx}`] = s.structure_id })
         setBuiltStructures(built)
+      }
+
+      const tSet = new Set((territory ?? []).map(t => `${t.row_idx},${t.col_idx}`))
+      if (territory?.length > 0) setPurchasedTerritory(tSet)
+
+      if (territory?.length > 0 || roads?.length > 0) {
+        setMap(prev => {
+          const next = prev.map(row => row.map(cell => ({ ...cell })))
+          // Apply purchased territory
+          territory?.forEach(({ row_idx, col_idx }) => {
+            next[row_idx][col_idx].type = CELL.EMPTY
+          })
+          // Apply wall expansions
+          const expanded = applyWallExpansions(next, tSet)
+          // Apply road modifications:
+          //   placed=true  → user added a road
+          //   placed=false → user demolished an original road
+          roads?.forEach(({ row_idx, col_idx, placed }) => {
+            expanded[row_idx][col_idx].type = placed ? CELL.ROAD : CELL.EMPTY
+          })
+          return expanded
+        })
       }
     })
   }, [navigate])
@@ -556,6 +1081,205 @@ export default function City() {
     if (!selected) return
     const cell = map[r][c]
 
+    // ── Demolish mode ──────────────────────────────────────────────────────────
+    if (selected === 'demolish') {
+      if (cell.type === CELL.ROAD) {
+        setMap(prev => {
+          const next = prev.map(row => row.map(cell => ({ ...cell })))
+          next[r][c].type = CELL.EMPTY
+          return next
+        })
+        supabase.auth.getSession().then(async ({ data: { session } }) => {
+          if (!session) return
+          const isOriginal = ORIGINAL_MAP[r][c].type === CELL.ROAD
+          const { error } = isOriginal
+            // Mark original road as removed
+            ? await supabase.from('city_roads').upsert(
+                { user_id: session.user.id, row_idx: r, col_idx: c, placed: false },
+                { onConflict: 'user_id,row_idx,col_idx' }
+              )
+            // Delete user-placed road record
+            : await supabase.from('city_roads')
+                .delete()
+                .eq('user_id', session.user.id)
+                .eq('row_idx', r)
+                .eq('col_idx', c)
+          if (error) {
+            console.error('road demolish error:', error)
+            setMap(prev => {
+              const next = prev.map(row => row.map(cell => ({ ...cell })))
+              next[r][c].type = CELL.ROAD
+              return next
+            })
+          }
+        })
+        return
+      }
+
+      const occupant = getOccupant(r, c, builtStructures)
+      if (occupant) {
+        const { structId, key: topLeftKey } = occupant
+        const [sr, sc] = topLeftKey.split(',').map(Number)
+        const structure = STRUCTURES.find(s => s.id === structId)
+        if (!structure) return
+
+        const refund = {
+          food:      Math.floor(structure.cost.food      * 0.8),
+          knowledge: Math.floor(structure.cost.knowledge * 0.8),
+          wood:      Math.floor(structure.cost.wood      * 0.8),
+        }
+
+        // Optimistic update
+        setResources(prev => ({
+          food:      prev.food      + refund.food,
+          knowledge: prev.knowledge + refund.knowledge,
+          wood:      prev.wood      + refund.wood,
+        }))
+        setBuiltStructures(prev => {
+          const next = { ...prev }
+          delete next[topLeftKey]
+          return next
+        })
+
+        // Persist to DB
+        supabase.auth.getSession().then(async ({ data: { session } }) => {
+          if (!session) return
+          const { error } = await supabase.rpc('demolish_structure', {
+            p_user_id:          session.user.id,
+            p_row_idx:          sr,
+            p_col_idx:          sc,
+            p_food_refund:      refund.food,
+            p_knowledge_refund: refund.knowledge,
+            p_wood_refund:      refund.wood,
+          })
+          if (error) {
+            console.error('demolish_structure error:', error)
+            setResources(prev => ({
+              food:      prev.food      - refund.food,
+              knowledge: prev.knowledge - refund.knowledge,
+              wood:      prev.wood      - refund.wood,
+            }))
+            setBuiltStructures(prev => ({ ...prev, [topLeftKey]: structId }))
+          }
+        })
+      }
+      return
+    }
+
+    // ── Move structure ─────────────────────────────────────────────────────────
+    if (selected === 'move') {
+      const occupant = getOccupant(r, c, builtStructures)
+
+      // Phase 1: nothing in hand — pick up the clicked structure
+      if (!movingStructure) {
+        if (!occupant) return
+        setMovingStructure({ structId: occupant.structId, fromKey: occupant.key })
+        return
+      }
+
+      // Phase 2: structure in hand
+      const { structId, fromKey } = movingStructure
+      const [fr, fc] = fromKey.split(',').map(Number)
+
+      // Clicking any cell of the picked-up structure cancels
+      if (occupant?.key === fromKey) {
+        setMovingStructure(null)
+        return
+      }
+
+      // Validate drop: 2×2 EMPTY and unoccupied (treating from-footprint as clear)
+      if (r + 1 >= GRID_SIZE || c + 1 >= GRID_SIZE) return
+      const fromFootprint = new Set([
+        `${fr},${fc}`, `${fr},${fc+1}`, `${fr+1},${fc}`, `${fr+1},${fc+1}`
+      ])
+      const canDrop = [[r,c],[r,c+1],[r+1,c],[r+1,c+1]].every(([tr,tc]) => {
+        if (map[tr][tc].type !== CELL.EMPTY) return false
+        const occ = getOccupant(tr, tc, builtStructures)
+        return !occ || fromFootprint.has(`${tr},${tc}`)
+      })
+      if (!canDrop) return
+
+      // No-op: dropping at same position
+      if (r === fr && c === fc) { setMovingStructure(null); return }
+
+      const toKey = `${r},${c}`
+
+      // Optimistic update
+      setBuiltStructures(prev => {
+        const next = { ...prev }
+        delete next[fromKey]
+        next[toKey] = structId
+        return next
+      })
+      setMovingStructure(null)
+
+      // Persist
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
+        if (!session) return
+        const { error } = await supabase.rpc('move_structure', {
+          p_user_id:  session.user.id,
+          p_from_row: fr,
+          p_from_col: fc,
+          p_to_row:   r,
+          p_to_col:   c,
+        })
+        if (error) {
+          console.error('move_structure error:', error)
+          setBuiltStructures(prev => {
+            const next = { ...prev }
+            delete next[toKey]
+            next[fromKey] = structId
+            return next
+          })
+        }
+      })
+      return
+    }
+
+    // ── Expand territory ───────────────────────────────────────────────────────
+    if (selected === 'expand') {
+      if (map[r][c].type !== CELL.GRASS) return
+      const dirs = [[-1,0],[1,0],[0,-1],[0,1]]
+      const isAdj = dirs.some(([dr, dc]) => {
+        const nr = r + dr, nc = c + dc
+        if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) return false
+        const nt = map[nr][nc].type
+        return nt === CELL.WALL || nt === CELL.EMPTY || nt === CELL.ROAD
+      })
+      if (!isAdj) return
+      const currentMoney = 20 + Object.values(builtStructures).filter(id => id === 'market').length * 10 - purchasedTerritory.size
+      if (currentMoney < 1) return
+
+      const key = `${r},${c}`
+      const newTerritory = new Set([...purchasedTerritory, key])
+      setPurchasedTerritory(newTerritory)
+      setMap(prev => {
+        const next = prev.map(row => row.map(cell => ({ ...cell })))
+        next[r][c].type = CELL.EMPTY
+        return applyWallExpansions(next, newTerritory)
+      })
+
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
+        if (!session) return
+        const { error } = await supabase.from('city_territory').insert({
+          user_id: session.user.id,
+          row_idx: r,
+          col_idx: c,
+        })
+        if (error) {
+          console.error('buy_territory error:', error)
+          setPurchasedTerritory(prev => { const next = new Set(prev); next.delete(key); return next })
+          setMap(prev => {
+            const next = prev.map(row => row.map(cell => ({ ...cell })))
+            next[r][c].type = CELL.GRASS
+            return next
+          })
+        }
+      })
+      return
+    }
+
+    // ── Road placement ─────────────────────────────────────────────────────────
     if (selected === 'road') {
       if (cell.type !== CELL.EMPTY) return
       setMap(prev => {
@@ -563,12 +1287,33 @@ export default function City() {
         next[r][c].type = CELL.ROAD
         return next
       })
+      supabase.auth.getSession().then(async ({ data: { session } }) => {
+        if (!session) return
+        const { error } = await supabase.from('city_roads').upsert(
+          { user_id: session.user.id, row_idx: r, col_idx: c, placed: true },
+          { onConflict: 'user_id,row_idx,col_idx' }
+        )
+        if (error) {
+          console.error('road save error:', error)
+          setMap(prev => {
+            const next = prev.map(row => row.map(cell => ({ ...cell })))
+            next[r][c].type = CELL.EMPTY
+            return next
+          })
+        }
+      })
       return
     }
 
-    if (cell.type !== CELL.SLOT) return
-    const slotId = cell.slotId
-    if (builtStructures[slotId] !== undefined) return
+    // ── Build structure ────────────────────────────────────────────────────────
+    if (cell.type !== CELL.EMPTY) return
+    // Validate the 2×2 footprint: all 4 cells must be EMPTY and unoccupied
+    if (r + 1 >= GRID_SIZE || c + 1 >= GRID_SIZE) return
+    const allEmpty = [[r,c],[r,c+1],[r+1,c],[r+1,c+1]].every(
+      ([tr,tc]) => map[tr][tc].type === CELL.EMPTY && !getOccupant(tr, tc, builtStructures)
+    )
+    if (!allEmpty) return
+    const cellKey = `${r},${c}`
     const structure = STRUCTURES.find(s => s.id === selected)
     if (!structure) return
     if (!Object.entries(structure.cost).every(([res, amt]) => resources[res] >= amt)) return
@@ -579,7 +1324,7 @@ export default function City() {
       wood:      prev.wood      - structure.cost.wood,
       knowledge: prev.knowledge - structure.cost.knowledge,
     }))
-    setBuiltStructures(prev => ({ ...prev, [slotId]: selected }))
+    setBuiltStructures(prev => ({ ...prev, [cellKey]: selected }))
     setSelected(null)
 
     // Persist to DB
@@ -587,7 +1332,8 @@ export default function City() {
       if (!session) return
       const { error } = await supabase.rpc('build_structure', {
         p_user_id:        session.user.id,
-        p_slot_id:        slotId,
+        p_row_idx:        r,
+        p_col_idx:        c,
         p_structure_id:   selected,
         p_food_cost:      structure.cost.food,
         p_knowledge_cost: structure.cost.knowledge,
@@ -603,12 +1349,12 @@ export default function City() {
         }))
         setBuiltStructures(prev => {
           const next = { ...prev }
-          delete next[slotId]
+          delete next[cellKey]
           return next
         })
       }
     })
-  }, [selected, map, builtStructures, resources])
+  }, [selected, map, builtStructures, resources, purchasedTerritory, movingStructure])
 
   if (!user) return null
 
@@ -622,9 +1368,40 @@ export default function City() {
           <Resource icon="📖" label="Knowledge" value={resources.knowledge} />
           <Resource icon="🪵" label="Wood"      value={resources.wood}      />
         </div>
-        <Link to="/dashboard" className="text-xs text-slate-400 hover:text-white transition-colors">
-          ← Dashboard
-        </Link>
+        <div className="flex items-center gap-4 sm:gap-6">
+          {(() => {
+            const grain      = Object.values(builtStructures).filter(id => id === 'granary').length * 10
+            const population = 20 + Object.values(builtStructures).filter(id => id === 'house').length * 4
+            const shortage   = grain < population
+            return (
+              <>
+                <Resource
+                  icon="🌾"
+                  label="Grain"
+                  value={<>{grain}<span className="text-slate-600 font-normal">/{population}</span></>}
+                  valueClass={shortage ? 'text-red-400' : ''}
+                />
+                {(() => {
+                  const grainShortage = Math.max(0, population - grain)
+                  const happiness = 10 - Math.floor(population / 4) - grainShortage
+                  return (
+                    <Resource
+                      icon={happiness >= 0 ? '😊' : '😞'}
+                      label="Happiness"
+                      value={happiness}
+                      valueClass={happiness < 0 ? 'text-red-400' : ''}
+                    />
+                  )
+                })()}
+                <Resource icon="👥" label="Population" value={population} />
+                <Resource icon="💰" label="Money" value={money} valueClass={money < 1 ? 'text-red-400' : ''} />
+              </>
+            )
+          })()}
+          <Link to="/dashboard" className="text-xs text-slate-400 hover:text-white transition-colors">
+            ← Dashboard
+          </Link>
+        </div>
       </div>
 
       {/* ── 3D canvas ── */}
@@ -638,45 +1415,81 @@ export default function City() {
             map={map}
             builtStructures={builtStructures}
             selected={selected}
+            movingStructure={movingStructure}
+            purchasedTerritory={purchasedTerritory}
             onCellClick={handleCellClick}
           />
         </Canvas>
 
-        {/* Build-mode hint */}
+        {/* Build/demolish mode hint */}
         {selected && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
             <div className={`border text-xs px-3 py-1.5 rounded-full shadow-lg ${
-              selected === 'road'
-                ? 'bg-slate-800/90 border-slate-600 text-slate-200'
-                : 'bg-amber-900/90 border-amber-600 text-amber-200'
+              selected === 'demolish'
+                ? 'bg-red-900/90 border-red-700 text-red-200'
+                : selected === 'expand'
+                  ? 'bg-yellow-900/90 border-yellow-700 text-yellow-200'
+                  : selected === 'move'
+                    ? 'bg-cyan-900/90 border-cyan-700 text-cyan-200'
+                    : selected === 'road'
+                      ? 'bg-slate-800/90 border-slate-600 text-slate-200'
+                      : 'bg-amber-900/90 border-amber-600 text-amber-200'
             }`}>
-              {selected === 'road'
-                ? 'Click empty territory to lay a road'
-                : 'Click a glowing slot to place'}
+              {selected === 'demolish'
+                ? 'Click a glowing structure or road to demolish it'
+                : selected === 'expand'
+                  ? `Click a glowing cell to purchase it — 💰 ${money} available`
+                  : selected === 'move'
+                    ? movingStructure
+                      ? 'Click a green cell to drop — or click the building again to cancel'
+                      : 'Click a building to pick it up'
+                    : selected === 'road'
+                      ? 'Click empty territory to lay a road'
+                      : 'Click a glowing slot to place'}
             </div>
           </div>
         )}
       </div>
 
       {/* ── Build panel ── */}
-      <div className="shrink-0 bg-slate-900 border-t border-slate-800" style={{ maxHeight: '220px' }}>
-        <div className="flex border-b border-slate-800">
-          {['structures', 'roads'].map(tab => (
+      <div className="shrink-0 bg-slate-900 border-t border-slate-800 flex flex-col" style={{ height: '240px' }}>
+        <div className="flex border-b border-slate-800 shrink-0">
+          {[
+            { id: 'structures', label: 'Structures' },
+            { id: 'roads',      label: 'Roads' },
+            { id: 'move',       label: '🔄 Move' },
+            { id: 'expand',     label: '🗺 Expand' },
+            { id: 'demolish',   label: '⛏ Demolish' },
+          ].map(tab => (
             <button
-              key={tab}
-              onClick={() => { setActiveTab(tab); setSelected(null) }}
-              className={`px-5 py-2.5 text-sm font-medium capitalize transition-colors ${
-                activeTab === tab
-                  ? 'text-white border-b-2 border-amber-500'
+              key={tab.id}
+              onClick={() => {
+                setActiveTab(tab.id)
+                setMovingStructure(null)
+                setSelected(
+                  tab.id === 'demolish' ? 'demolish' :
+                  tab.id === 'expand'   ? 'expand'   :
+                  tab.id === 'move'     ? 'move'      : null
+                )
+              }}
+              className={`px-5 py-2.5 text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? tab.id === 'demolish'
+                    ? 'text-red-300 border-b-2 border-red-500'
+                    : tab.id === 'expand'
+                      ? 'text-yellow-300 border-b-2 border-yellow-500'
+                      : tab.id === 'move'
+                        ? 'text-cyan-300 border-b-2 border-cyan-500'
+                        : 'text-white border-b-2 border-amber-500'
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              {tab}
+              {tab.label}
             </button>
           ))}
         </div>
 
-        <div className="p-3 overflow-y-auto" style={{ maxHeight: '160px' }}>
+        <div className="flex-1 overflow-y-auto p-3">
           {activeTab === 'structures' && (
             <div className="space-y-2">
               {STRUCTURES.map(s => (
@@ -709,6 +1522,64 @@ export default function City() {
               }`}>
                 {selected === 'road' ? 'Cancel' : 'Build'}
               </span>
+            </div>
+          )}
+          {activeTab === 'move' && (
+            <div className="p-1">
+              <div className="bg-cyan-950/40 border border-cyan-900/50 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">🔄</span>
+                  <p className="text-cyan-300 text-sm font-semibold">
+                    {movingStructure ? 'Drop the building' : 'Move a building'}
+                  </p>
+                </div>
+                <p className="text-slate-400 text-xs leading-relaxed">
+                  {movingStructure
+                    ? <>Click a <span className="text-green-400 font-medium">green cell</span> to place the building, or click it again to cancel.</>
+                    : <>Click any <span className="text-cyan-300 font-medium">glowing building</span> to pick it up, then click any empty 2×2 area to place it.</>
+                  }
+                </p>
+                <p className="text-slate-500 text-xs mt-2.5 pt-2.5 border-t border-cyan-900/30">
+                  Moving is free — no resources are spent or refunded.
+                </p>
+              </div>
+            </div>
+          )}
+          {activeTab === 'expand' && (
+            <div className="p-1">
+              <div className="bg-yellow-950/40 border border-yellow-900/50 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base">🗺️</span>
+                    <p className="text-yellow-300 text-sm font-semibold">Expand territory</p>
+                  </div>
+                  <span className={`text-sm font-bold tabular-nums ${money < 1 ? 'text-red-400' : 'text-yellow-300'}`}>
+                    💰 {money} available
+                  </span>
+                </div>
+                <p className="text-slate-400 text-xs leading-relaxed">
+                  Click any <span className="text-yellow-300 font-medium">glowing cell</span> outside the walls to annex it. Purchased land can have roads built on it.
+                </p>
+                <p className="text-slate-500 text-xs mt-2.5 pt-2.5 border-t border-yellow-900/30">
+                  Cost: <span className="text-yellow-400 font-medium">1 💰 per cell.</span> Build markets to earn more money.
+                </p>
+              </div>
+            </div>
+          )}
+          {activeTab === 'demolish' && (
+            <div className="p-1">
+              <div className="bg-red-950/40 border border-red-900/50 rounded-xl p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-base">⛏️</span>
+                  <p className="text-red-300 text-sm font-semibold">Demolish mode active</p>
+                </div>
+                <p className="text-slate-400 text-xs leading-relaxed">
+                  Click any <span className="text-red-300 font-medium">built structure</span> or <span className="text-red-300 font-medium">road</span> on the map to remove it. Demolishable tiles glow red.
+                </p>
+                <p className="text-slate-500 text-xs mt-2.5 pt-2.5 border-t border-red-900/30">
+                  Structures refund <span className="text-amber-400 font-medium">80%</span> of their build cost. Roads are free to remove.
+                </p>
+              </div>
             </div>
           )}
         </div>

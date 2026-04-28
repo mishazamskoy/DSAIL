@@ -86,16 +86,6 @@ export function createInitialMap() {
     grid[r][9].type = CELL.ROAD;
   }
 
-  // Structure slots (2×2 each) — placed after roads; no overlaps by design
-  STRUCTURE_SLOTS.forEach(([sr, sc], idx) => {
-    for (let dr = 0; dr <= 1; dr++) {
-      for (let dc = 0; dc <= 1; dc++) {
-        grid[sr + dr][sc + dc].type = CELL.SLOT;
-        grid[sr + dr][sc + dc].slotId = idx;
-      }
-    }
-  });
-
   return grid;
 }
 
