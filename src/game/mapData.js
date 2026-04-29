@@ -91,5 +91,5 @@ export function createInitialMap() {
 
 // Deterministic grass shade variation (3 shades)
 export function grassShade(r, c) {
-  return (r * 3 + c * 7) % 3;
+  return ((r * 3 + c * 7) % 3 + 3) % 3;
 }

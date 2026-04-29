@@ -42,6 +42,19 @@ const STRUCTURES = [
     cost: { wood: 20, food: 0, knowledge: 0 },
     generates: [{ icon: '👥', value: 4, label: 'population' }],
   },
+  {
+    id: 'school',
+    name: 'School',
+    emoji: '🎓',
+    renderIcon: () => <SchoolIcon />,
+    desc: 'A hall of learning that enriches the city.',
+    cost: { knowledge: 20, food: 0, wood: 0 },
+    generates: [
+      { icon: '😊', value: 2, label: 'happiness' },
+      { icon: '💰', value: 4, label: 'money' },
+      { icon: '🌾', value: 2, label: 'grain' },
+    ],
+  },
 ]
 
 const GRASS_HEX = ['#166534', '#15803d', '#14532d']
@@ -122,7 +135,7 @@ function getOccupant(r, c, builtStructures) {
 
 // ─── Ground tile ───────────────────────────────────────────────────────────────
 
-function GroundTile({ cell, builtId, selected, isValidBuild, isPickedUp, purchasable, onCellClick, onCellHover }) {
+function GroundTile({ cell, builtId, selected, isValidBuild, isValidHighlight, isPickedUp, purchasable, onCellClick, onCellHover }) {
   const r = cell._r, c = cell._c
   const [wx, , wz] = cellWorld(r, c)
 
@@ -146,10 +159,10 @@ function GroundTile({ cell, builtId, selected, isValidBuild, isPickedUp, purchas
         if (isDemolishable)                { emissive = '#ef4444'; emissiveIntensity = 0.6  }
         else if (isMoveMode && isPickedUp) { emissive = '#f97316'; emissiveIntensity = 0.65 }
         else if (isMoveMode)               { emissive = '#06b6d4'; emissiveIntensity = 0.45 }
-      } else if (isMoveMode && isValidBuild) {
+      } else if (isMoveMode && (isValidBuild || isValidHighlight)) {
         color = '#14532d'; height = 0.18
         emissive = '#16a34a'; emissiveIntensity = 0.4
-      } else if (isBuildMode && isValidBuild) {
+      } else if (isBuildMode && (isValidBuild || isValidHighlight)) {
         color = '#fbbf24'; height = 0.18
         emissive = '#d97706'; emissiveIntensity = 0.25
       } else {
@@ -656,6 +669,86 @@ function House3D({ cx, cz }) {
   )
 }
 
+// ─── School 3D ────────────────────────────────────────────────────────────────
+// Stone hall of learning with bell tower and tall arched windows
+
+function School3D({ cx, cz }) {
+  const STONE  = '#94a3b8'  // blue-grey stone walls
+  const ROOF   = '#475569'  // dark slate roof
+  const DOOR   = '#1e293b'  // dark arched door
+  const GLASS  = '#7dd3fc'  // light blue leaded windows
+  const BASE   = '#cbd5e1'  // stone foundation
+  const BELL   = '#f59e0b'  // brass bell
+
+  return (
+    <group position={[cx, 0, cz]}>
+      {/* Foundation */}
+      <mesh position={[0, 0.07, 0]} receiveShadow>
+        <boxGeometry args={[1.88, 0.14, 1.88]} />
+        <meshStandardMaterial color={BASE} roughness={0.9} />
+      </mesh>
+
+      {/* Main body */}
+      <mesh position={[0, 0.88, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.62, 1.48, 1.62]} />
+        <meshStandardMaterial color={STONE} roughness={0.8} />
+      </mesh>
+
+      {/* Peaked roof */}
+      <mesh position={[0, 1.88, 0]} rotation={[0, Math.PI / 4, 0]} castShadow>
+        <coneGeometry args={[1.24, 0.76, 4]} />
+        <meshStandardMaterial color={ROOF} roughness={0.7} />
+      </mesh>
+      {/* Roof trim */}
+      <mesh position={[0, 1.52, 0]}>
+        <boxGeometry args={[1.74, 0.08, 1.74]} />
+        <meshStandardMaterial color={ROOF} roughness={0.7} />
+      </mesh>
+
+      {/* Bell tower */}
+      <mesh position={[0, 2.42, 0]} castShadow>
+        <boxGeometry args={[0.44, 0.5, 0.44]} />
+        <meshStandardMaterial color={STONE} roughness={0.8} />
+      </mesh>
+      <mesh position={[0, 2.82, 0]} rotation={[0, Math.PI / 4, 0]} castShadow>
+        <coneGeometry args={[0.36, 0.38, 4]} />
+        <meshStandardMaterial color={ROOF} roughness={0.7} />
+      </mesh>
+      {/* Bell */}
+      <mesh position={[0, 2.44, 0]}>
+        <sphereGeometry args={[0.1, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.6]} />
+        <meshStandardMaterial color={BELL} metalness={0.5} roughness={0.4} />
+      </mesh>
+
+      {/* Arched door */}
+      <mesh position={[0, 0.46, 0.82]}>
+        <boxGeometry args={[0.36, 0.68, 0.07]} />
+        <meshStandardMaterial color={DOOR} roughness={0.8} />
+      </mesh>
+      <mesh position={[0, 0.82, 0.82]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.18, 0.18, 0.07, 8, 1, false, 0, Math.PI]} />
+        <meshStandardMaterial color={DOOR} roughness={0.8} />
+      </mesh>
+
+      {/* Front tall windows */}
+      {[-0.52, 0.52].map(ox => (
+        <mesh key={ox} position={[ox, 0.96, 0.822]}>
+          <boxGeometry args={[0.22, 0.54, 0.06]} />
+          <meshStandardMaterial color={GLASS} roughness={0.2} metalness={0.1} />
+        </mesh>
+      ))}
+
+      {/* Side windows */}
+      {[-0.5, 0.5].map(oz => (
+        <mesh key={oz} position={[0.822, 0.96, oz]}>
+          <boxGeometry args={[0.06, 0.54, 0.22]} />
+          <meshStandardMaterial color={GLASS} roughness={0.2} metalness={0.1} />
+        </mesh>
+      ))}
+    </group>
+  )
+}
+
 // ─── City Gate 3D ─────────────────────────────────────────────────────────────
 // Positioned at the south wall opening: row 16 → world z = 7.5, cols 8-9 center → x = 0
 // Towers sit on wall tiles at cols 7 (x=-1.5) and 10 (x=1.5)
@@ -747,6 +840,21 @@ function GameScene({ map, builtStructures, selected, movingStructure, purchasedT
     return set
   }, [selected, map, builtStructures, movingStructure])
 
+  // Expand validBuildCells (top-left corners only) to all 4 cells of each footprint
+  // so every cell in a valid placement zone gets the green highlight, not just the top-left.
+  const validHighlightCells = useMemo(() => {
+    if (!validBuildCells) return null
+    const expanded = new Set()
+    for (const key of validBuildCells) {
+      const [r, c] = key.split(',').map(Number)
+      expanded.add(`${r},${c}`)
+      expanded.add(`${r},${c+1}`)
+      expanded.add(`${r+1},${c}`)
+      expanded.add(`${r+1},${c+1}`)
+    }
+    return expanded
+  }, [validBuildCells])
+
   const pickedUpCells = useMemo(() => {
     if (!movingStructure) return null
     const [fr, fc] = movingStructure.fromKey.split(',').map(Number)
@@ -824,6 +932,7 @@ function GameScene({ map, builtStructures, selected, movingStructure, purchasedT
             builtId={getOccupant(r, c, builtStructures)?.structId}
             selected={selected}
             isValidBuild={validBuildCells?.has(`${r},${c}`) ?? false}
+            isValidHighlight={validHighlightCells?.has(`${r},${c}`) ?? false}
             isPickedUp={pickedUpCells?.has(`${r},${c}`) ?? false}
             purchasable={purchasableCells?.has(`${r},${c}`) ?? false}
             onCellClick={onCellClick}
@@ -854,6 +963,7 @@ function GameScene({ map, builtStructures, selected, movingStructure, purchasedT
         if (structId === 'granary') return <Granary3D key={cellKey} cx={cx} cz={cz} />
         if (structId === 'market')  return <Market3D  key={cellKey} cx={cx} cz={cz} />
         if (structId === 'house')   return <House3D   key={cellKey} cx={cx} cz={cz} />
+        if (structId === 'school')  return <School3D  key={cellKey} cx={cx} cz={cz} />
         return null
       })}
     </>
@@ -940,6 +1050,28 @@ function HouseIcon() {
   )
 }
 
+function SchoolIcon() {
+  return (
+    <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      {/* Main walls */}
+      <rect x="6" y="20" width="28" height="16" fill="#94a3b8" stroke="#64748b" strokeWidth="0.8" />
+      {/* Main roof */}
+      <polygon points="4,20 20,10 36,20" fill="#475569" />
+      {/* Bell tower */}
+      <rect x="16" y="5" width="8" height="9" fill="#94a3b8" stroke="#64748b" strokeWidth="0.6" />
+      <polygon points="14,6 20,1 26,6" fill="#475569" />
+      {/* Bell */}
+      <circle cx="20" cy="10" r="1.5" fill="#f59e0b" />
+      {/* Door */}
+      <rect x="16.5" y="28" width="7" height="8" rx="1" fill="#1e293b" />
+      <ellipse cx="20" cy="28" rx="3.5" ry="2.2" fill="#1e293b" />
+      {/* Windows */}
+      <rect x="8" y="22" width="5" height="7" rx="0.5" fill="#7dd3fc" stroke="#475569" strokeWidth="0.5" />
+      <rect x="27" y="22" width="5" height="7" rx="0.5" fill="#7dd3fc" stroke="#475569" strokeWidth="0.5" />
+    </svg>
+  )
+}
+
 function StructureCard({ structure, resources, selected, onSelect, onCancel }) {
   const canAfford = Object.entries(structure.cost).every(
     ([res, amt]) => resources[res] >= amt
@@ -1008,9 +1140,92 @@ export default function City() {
   const [selected, setSelected]               = useState(null)
   const [movingStructure, setMovingStructure] = useState(null) // { structId, fromKey } when picking up
 
-  // money = (markets × 10) − cells purchased
+  const [showAdvisor, setShowAdvisor]         = useState(false)
+  const [advisorQuestion, setAdvisorQuestion] = useState('')
+  const [advisorAdvice, setAdvisorAdvice]     = useState(null)
+  const [advisorLoading, setAdvisorLoading]   = useState(false)
+  const [advisorError, setAdvisorError]       = useState(null)
+
+  const [buildError, setBuildError]           = useState(null)
+
+  const [showActivityLog, setShowActivityLog] = useState(false)
+  const [activityLogs, setActivityLogs]       = useState(null)
+  const [activityText, setActivityText]       = useState('')
+  const [submitting, setSubmitting]           = useState(false)
+  const [award, setAward]                     = useState(null)
+  const [submitError, setSubmitError]         = useState(null)
+
+  async function handleSubmitActivity(e) {
+    e.preventDefault()
+    if (!activityText.trim() || submitting) return
+    setSubmitting(true); setAward(null); setSubmitError(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/evaluate-activity`,
+        { method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({ activityText: activityText.trim() }) }
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      const result = await res.json()
+      setAward(result)
+      // Update resource panel immediately
+      if ((result.total_earned ?? 0) > 0) {
+        setResources(prev => ({
+          food:      prev.food      + (result.food_points      ?? 0),
+          knowledge: prev.knowledge + (result.knowledge_points ?? 0),
+          wood:      prev.wood      + (result.wood_points      ?? 0),
+        }))
+      }
+      setActivityLogs(prev => [{
+        id: crypto.randomUUID(),
+        activity_text:     activityText.trim(),
+        food_points:       result.food_points       ?? 0,
+        knowledge_points:  result.knowledge_points  ?? 0,
+        wood_points:       result.wood_points       ?? 0,
+        grain_points:      0,
+        happiness_points:  0,
+        population_points: 0,
+        money_points:      0,
+        total_points:      result.total_earned      ?? 0,
+        logged_at: new Date().toISOString(),
+      }, ...(prev ?? [])].slice(0, 20))
+      setActivityText('')
+    } catch (err) {
+      console.error(err)
+      setSubmitError(err.message || 'Something went wrong. Please try again.')
+    } finally { setSubmitting(false) }
+  }
+
+  async function handleAskAdvisor(e) {
+    e.preventDefault()
+    if (advisorLoading) return
+    setAdvisorLoading(true); setAdvisorAdvice(null); setAdvisorError(null)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const res = await fetch(
+        `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/city-advisor`,
+        { method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+          body: JSON.stringify({ question: advisorQuestion.trim() }) }
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+      const result = await res.json()
+      setAdvisorAdvice(result.advice)
+      setAdvisorQuestion('')
+    } catch (err) {
+      console.error(err)
+      setAdvisorError(err.message || 'The advisor is unavailable. Try again.')
+    } finally { setAdvisorLoading(false) }
+  }
+
+  // money = (markets × 10) + (schools × 4) − cells purchased
   const money = useMemo(
-    () => 20 + Object.values(builtStructures).filter(id => id === 'market').length * 10 - purchasedTerritory.size,
+    () => 20
+      + Object.values(builtStructures).filter(id => id === 'market').length * 10
+      + Object.values(builtStructures).filter(id => id === 'school').length * 4
+      - purchasedTerritory.size,
     [builtStructures, purchasedTerritory]
   )
 
@@ -1020,7 +1235,7 @@ export default function City() {
       setUser(session.user)
       const uid = session.user.id
 
-      const [{ data: ud }, { data: structs }, { data: territory }, { data: roads }] = await Promise.all([
+      const [{ data: ud }, { data: structs }, { data: territory }, { data: roads }, { data: logs }] = await Promise.all([
         supabase
           .from('user_data')
           .select('food_points, knowledge_points, wood_points')
@@ -1038,7 +1253,14 @@ export default function City() {
           .from('city_roads')
           .select('row_idx, col_idx, placed')
           .eq('user_id', uid),
+        supabase
+          .from('activity_logs')
+          .select('id, activity_text, grain_points, happiness_points, population_points, money_points, food_points, knowledge_points, wood_points, total_points, logged_at')
+          .eq('user_id', uid)
+          .order('logged_at', { ascending: false })
+          .limit(20),
       ])
+      setActivityLogs(logs ?? [])
 
       if (ud) {
         setResources({
@@ -1046,6 +1268,10 @@ export default function City() {
           knowledge: ud.knowledge_points ?? 0,
           wood:      ud.wood_points      ?? 0,
         })
+      } else {
+        // New account: ensure the user_data row exists so build_structure can find it
+        await supabase.from('user_data')
+          .upsert({ user_id: uid }, { onConflict: 'user_id', ignoreDuplicates: true })
       }
       if (structs) {
         const built = {}
@@ -1247,7 +1473,7 @@ export default function City() {
         return nt === CELL.WALL || nt === CELL.EMPTY || nt === CELL.ROAD
       })
       if (!isAdj) return
-      const currentMoney = 20 + Object.values(builtStructures).filter(id => id === 'market').length * 10 - purchasedTerritory.size
+      const currentMoney = 20 + Object.values(builtStructures).filter(id => id === 'market').length * 10 + Object.values(builtStructures).filter(id => id === 'school').length * 4 - purchasedTerritory.size
       if (currentMoney < 1) return
 
       const key = `${r},${c}`
@@ -1352,6 +1578,9 @@ export default function City() {
           delete next[cellKey]
           return next
         })
+        const msg = error.message || error.details || JSON.stringify(error)
+        setBuildError(msg)
+        setTimeout(() => setBuildError(null), 6000)
       }
     })
   }, [selected, map, builtStructures, resources, purchasedTerritory, movingStructure])
@@ -1360,6 +1589,13 @@ export default function City() {
 
   return (
     <div className="h-screen bg-slate-950 text-white flex flex-col overflow-hidden select-none">
+
+      {/* ── Build error banner ── */}
+      {buildError && (
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-900/95 border border-red-500 text-red-200 text-sm shadow-lg pointer-events-none">
+          <span className="font-semibold">Build failed:</span> {buildError}
+        </div>
+      )}
 
       {/* ── HUD ── */}
       <div className="flex items-center justify-between px-3 sm:px-5 h-12 bg-slate-900/90 border-b border-slate-800 shrink-0 z-10">
@@ -1370,7 +1606,8 @@ export default function City() {
         </div>
         <div className="flex items-center gap-4 sm:gap-6">
           {(() => {
-            const grain      = Object.values(builtStructures).filter(id => id === 'granary').length * 10
+            const numSchools = Object.values(builtStructures).filter(id => id === 'school').length
+            const grain      = Object.values(builtStructures).filter(id => id === 'granary').length * 10 + numSchools * 2
             const population = 20 + Object.values(builtStructures).filter(id => id === 'house').length * 4
             const shortage   = grain < population
             return (
@@ -1383,7 +1620,7 @@ export default function City() {
                 />
                 {(() => {
                   const grainShortage = Math.max(0, population - grain)
-                  const happiness = 10 - Math.floor(population / 4) - grainShortage
+                  const happiness = 10 - Math.floor(population / 4) - grainShortage + numSchools * 2
                   return (
                     <Resource
                       icon={happiness >= 0 ? '😊' : '😞'}
@@ -1420,6 +1657,199 @@ export default function City() {
             onCellClick={handleCellClick}
           />
         </Canvas>
+
+        {/* ── Left overlay buttons ── */}
+        <div className="absolute top-3 left-3 z-20 flex flex-col gap-2">
+          <button
+            onClick={() => { setShowAdvisor(v => !v); setShowActivityLog(false) }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold shadow-lg transition-colors ${
+              showAdvisor
+                ? 'bg-amber-500 border-amber-400 text-stone-950'
+                : 'bg-slate-900/90 border-slate-700 text-amber-400 hover:border-amber-500/60 hover:text-amber-300'
+            }`}
+          >
+            <span className="text-sm leading-none">👑</span>
+            AI City Advisor
+          </button>
+
+          <button
+            onClick={() => { setShowActivityLog(v => !v); setShowAdvisor(false) }}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-bold shadow-lg transition-colors ${
+              showActivityLog
+                ? 'bg-amber-500 border-amber-400 text-stone-950'
+                : 'bg-slate-900/90 border-slate-700 text-amber-400 hover:border-amber-500/60 hover:text-amber-300'
+            }`}
+          >
+            <span className="text-sm leading-none">📜</span>
+            Chronicle Today's Deeds
+          </button>
+        </div>
+
+        {/* ── Advisor popup ── */}
+        {showAdvisor && (
+          <div className="absolute top-12 left-3 z-20 w-80 bg-slate-900/95 border border-slate-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden backdrop-blur-sm">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-base leading-none">👑</span>
+                <p className="text-sm font-bold text-amber-400">AI City Advisor</p>
+              </div>
+              <button
+                onClick={() => setShowAdvisor(false)}
+                className="text-slate-500 hover:text-white transition-colors text-lg leading-none px-1"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-4 flex flex-col gap-3">
+              <p className="text-slate-400 text-xs leading-relaxed">
+                Ask for city-building guidance, or leave blank for today's suggestion.
+              </p>
+              <form onSubmit={handleAskAdvisor} className="flex flex-col gap-2">
+                <input
+                  type="text"
+                  value={advisorQuestion}
+                  onChange={e => setAdvisorQuestion(e.target.value)}
+                  placeholder="e.g. How should I grow my city? (optional)"
+                  className="w-full bg-slate-800/70 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500/50 transition-colors"
+                />
+                <button
+                  type="submit"
+                  disabled={advisorLoading}
+                  className="w-full px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-colors"
+                >
+                  {advisorLoading ? 'Consulting the advisor…' : 'Seek Counsel'}
+                </button>
+              </form>
+
+              {advisorError && (
+                <p className="text-red-400 text-xs">{advisorError}</p>
+              )}
+
+              {advisorAdvice && (
+                <div className="bg-slate-800/60 border border-slate-700/60 rounded-xl p-3">
+                  <p className="text-slate-200 text-xs leading-relaxed">{advisorAdvice}</p>
+                </div>
+              )}
+
+              {!advisorAdvice && !advisorError && !advisorLoading && (
+                <p className="text-slate-600 text-xs italic text-center py-2">
+                  The advisor awaits your question…
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Chronicle Today's Deeds popup ── */}
+        {showActivityLog && (
+          <div className="absolute top-20 left-3 z-20 w-80 bg-slate-900/95 border border-slate-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden backdrop-blur-sm max-h-[70vh]">
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-base leading-none">📜</span>
+                <p className="text-sm font-bold text-amber-400">Chronicle Today's Deeds</p>
+              </div>
+              <button
+                onClick={() => setShowActivityLog(false)}
+                className="text-slate-500 hover:text-white transition-colors text-lg leading-none px-1"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+
+            {/* Submit form */}
+            <div className="p-4 border-b border-slate-800 shrink-0">
+              <form onSubmit={handleSubmitActivity} className="flex flex-col gap-2">
+                <textarea
+                  value={activityText}
+                  onChange={e => setActivityText(e.target.value)}
+                  placeholder="e.g. Ran 5km, had a salad, meditated 20 min…"
+                  rows={3}
+                  className="w-full bg-slate-800/70 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 resize-none focus:outline-none focus:ring-2 focus:ring-amber-500/30 focus:border-amber-500/50 transition-colors"
+                />
+                <button
+                  type="submit"
+                  disabled={submitting || !activityText.trim()}
+                  className="w-full px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-colors"
+                >
+                  {submitting ? 'Claude is evaluating…' : 'Submit to Chronicle'}
+                </button>
+              </form>
+
+              {submitError && <p className="text-red-400 text-xs mt-2">{submitError}</p>}
+
+              {award && (
+                <div className="mt-3 pt-3 border-t border-slate-800">
+                  {award.total_earned === 0 ? (
+                    <p className="text-slate-400 text-xs">{award.message}</p>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-slate-300 text-xs leading-relaxed">{award.message}</p>
+                      <div className="flex flex-wrap gap-2">
+                        {award.food_points      > 0 && <span className="text-[10px] font-bold text-emerald-400">🍎 +{award.food_points} food</span>}
+                        {award.knowledge_points > 0 && <span className="text-[10px] font-bold text-sky-400">📚 +{award.knowledge_points} knowledge</span>}
+                        {award.wood_points      > 0 && <span className="text-[10px] font-bold text-amber-400">🪵 +{award.wood_points} wood</span>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Log list */}
+            <div className="overflow-y-auto flex-1">
+              {activityLogs === null && (
+                <p className="text-slate-500 text-xs text-center py-8">Loading…</p>
+              )}
+              {activityLogs !== null && activityLogs.length === 0 && (
+                <p className="text-slate-500 text-xs text-center py-8 italic">No activities logged yet.</p>
+              )}
+              {activityLogs !== null && activityLogs.length > 0 && (
+                <div className="divide-y divide-slate-800">
+                  {activityLogs.map(log => {
+                    const date    = new Date(log.logged_at)
+                    const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+                    const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+                    const badges  = [
+                      (log.food_points      ?? 0) > 0 && { label: `+${log.food_points}`,      icon: '🍎', cls: 'text-emerald-400' },
+                      (log.knowledge_points ?? 0) > 0 && { label: `+${log.knowledge_points}`, icon: '📚', cls: 'text-sky-400'     },
+                      (log.wood_points      ?? 0) > 0 && { label: `+${log.wood_points}`,      icon: '🪵', cls: 'text-amber-400'   },
+                    ].filter(Boolean)
+
+                    return (
+                      <div key={log.id} className="flex items-start gap-3 px-4 py-3">
+                        <div className="shrink-0 pt-1">
+                          <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${badges.length > 0 ? 'bg-amber-400' : 'bg-slate-600'}`} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[10px] text-slate-500 mb-0.5">{dateStr} · {timeStr}</p>
+                          <p className="text-xs text-slate-300 leading-relaxed">{log.activity_text}</p>
+                          {badges.length > 0 && (
+                            <div className="flex flex-wrap gap-2 mt-1.5">
+                              {badges.map((b, i) => (
+                                <span key={i} className={`text-[10px] font-bold tabular-nums ${b.cls}`}>
+                                  {b.icon} {b.label}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {badges.length === 0 && (
+                            <span className="text-[10px] text-slate-600 mt-0.5 block">no reward</span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Build/demolish mode hint */}
         {selected && (

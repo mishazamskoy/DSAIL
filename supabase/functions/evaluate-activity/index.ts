@@ -1,4 +1,3 @@
-import Anthropic from 'npm:@anthropic-ai/sdk'
 import { createClient } from 'npm:@supabase/supabase-js@2'
 
 const corsHeaders = {
@@ -12,7 +11,6 @@ Deno.serve(async (req) => {
   }
 
   try {
-    // Verify auth
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
@@ -21,19 +19,26 @@ Deno.serve(async (req) => {
       })
     }
 
-    const supabase = createClient(
+    // User-scoped client — only used for auth verification
+    const supabaseUser = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_ANON_KEY')!,
       { global: { headers: { Authorization: authHeader } } }
     )
 
-    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
     if (authError || !user) {
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
     }
+
+    // Service-role client — bypasses RLS for all DB writes
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    )
 
     const { activityText } = await req.json()
     if (!activityText || typeof activityText !== 'string' || activityText.trim().length === 0) {
@@ -43,69 +48,103 @@ Deno.serve(async (req) => {
       })
     }
 
-    // Call Claude to evaluate the activity
-    const anthropic = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY') })
+    // Call Anthropic API directly via fetch to avoid SDK version drift issues
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': Deno.env.get('ANTHROPIC_API_KEY')!,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-opus-4-6',
+        max_tokens: 300,
+        system: `You are a strict health and wellness evaluator for a medieval city-building game. Players earn three types of building resources ONLY for behaviours that genuinely promote health and wellbeing.
 
-    const response = await anthropic.messages.create({
-      model: 'claude-opus-4-6',
-      max_tokens: 256,
-      system: `You are a health and wellness evaluator for a city-building game. Players earn resources by doing healthy activities and eating well. Evaluate the submitted activity/food entry and award points in three categories:
+RESOURCES (each scored 0–20 per entry):
+- food_points: Awarded for healthy eating — nutritious home-cooked meals, balanced diet, fruits and vegetables, proper hydration. Award 0 for junk food, fast food, fried food, candy, sugary drinks, or excessive alcohol.
+- knowledge_points: Awarded for mental wellness — reading, learning, studying, meditation, journaling, gratitude practice, quality sleep habits, therapy, meaningful social connection, acts of kindness.
+- wood_points: Awarded for physical activity — exercise, sport, strength training, running, cycling, hiking, yoga, swimming, outdoor activity, any deliberate movement.
 
-- food_points: awarded for healthy eating, cooking, nutrition habits (0-20 per entry)
-- knowledge_points: awarded for mental wellness, learning, meditation, reading, journaling (0-20 per entry)
-- wood_points: awarded for physical activity, exercise, movement, outdoor activities (0-20 per entry)
+ZERO POINTS in all categories for:
+- Unhealthy food (junk, fried, fast food, candy, soda, excessive alcohol)
+- Sedentary behaviour (watching TV, lying on the couch, gaming for hours, scrolling phone)
+- Neutral daily tasks (commuting, housework, shopping, ordinary desk work)
+- Anything harmful or that undermines health
 
-Rules:
-- Only award points for genuinely health-positive activities. Unhealthy activities (junk food, sedentary habits, etc.) earn 0 points.
-- Be generous but fair — even small healthy choices should earn some points.
-- A single strong activity can earn up to 20 points in its primary category.
-- Multiple relevant categories can each earn points for the same entry.
+SCORING RUBRIC (for genuinely healthy activities only):
+- Minor healthy choice (glass of water, 10-min walk, short stretch): 1–5 pts
+- Moderate activity (balanced meal, 30-min yoga, 30-min read, focused study session): 6–12 pts
+- Strong activity (10km run, cooked nutritious meal from scratch, 1-hr meditation, intensive study): 13–20 pts
 
-Respond ONLY with valid JSON in this exact format (no markdown, no explanation):
-{"food_points": 0, "knowledge_points": 0, "wood_points": 0, "message": "Brief encouraging message about what was rewarded and why"}`,
-      messages: [
-        { role: 'user', content: activityText.trim() }
-      ],
+Mixed entries: only score the healthy parts. A meal of salad AND fried chicken earns food_points only for the salad portion.
+
+Respond ONLY with valid JSON (no markdown, no extra text):
+{"food_points": 0, "knowledge_points": 0, "wood_points": 0, "message": "Brief honest message — acknowledge what was rewarded and, if nothing was rewarded for something unhealthy, gently note why"}`,
+        messages: [{ role: 'user', content: activityText.trim() }],
+      }),
     })
 
-    const text = response.content[0].type === 'text' ? response.content[0].text : ''
-    let award: { food_points: number; knowledge_points: number; wood_points: number; message: string }
+    if (!anthropicRes.ok) {
+      const errText = await anthropicRes.text()
+      console.error('Anthropic API error:', anthropicRes.status, errText)
+      throw new Error(`Anthropic API error: ${anthropicRes.status}`)
+    }
+
+    const anthropicData = await anthropicRes.json()
+    const text = anthropicData.content?.[0]?.type === 'text' ? anthropicData.content[0].text : ''
+
+    let award: {
+      food_points: number
+      knowledge_points: number
+      wood_points: number
+      message: string
+    }
     try {
       award = JSON.parse(text)
     } catch {
       award = { food_points: 0, knowledge_points: 0, wood_points: 0, message: 'Could not evaluate activity.' }
     }
 
-    // Clamp values
-    award.food_points = Math.max(0, Math.min(20, Math.round(award.food_points ?? 0)))
-    award.knowledge_points = Math.max(0, Math.min(20, Math.round(award.knowledge_points ?? 0)))
-    award.wood_points = Math.max(0, Math.min(20, Math.round(award.wood_points ?? 0)))
+    // Clamp all values to [0, 20]
+    const clamp = (n: number) => Math.max(0, Math.min(20, Math.round(n ?? 0)))
+    award.food_points      = clamp(award.food_points)
+    award.knowledge_points = clamp(award.knowledge_points)
+    award.wood_points      = clamp(award.wood_points)
     const earned = award.food_points + award.knowledge_points + award.wood_points
 
-    // Always log the activity so the City Advisor can reference history
-    await supabase.from('activity_logs').insert({
-      user_id:          user.id,
-      activity_text:    activityText.trim(),
-      food_points:      award.food_points,
-      knowledge_points: award.knowledge_points,
-      wood_points:      award.wood_points,
-      total_points:     earned,
+    // Always log the activity
+    const { error: logError } = await supabase.from('activity_logs').insert({
+      user_id:           user.id,
+      activity_text:     activityText.trim(),
+      food_points:       award.food_points,
+      knowledge_points:  award.knowledge_points,
+      wood_points:       award.wood_points,
+      total_points:      earned,
+      // city-metric columns — always 0, derived from structures not activities
+      grain_points:      0,
+      happiness_points:  0,
+      population_points: 0,
+      money_points:      0,
     })
+    if (logError) console.error('activity_logs insert error:', logError)
 
     if (earned > 0) {
-      // Upsert user_data row (ensure it exists first), then increment
-      await supabase.from('user_data').upsert(
+      // Ensure a user_data row exists before incrementing
+      const { error: upsertError } = await supabase.from('user_data').upsert(
         { user_id: user.id },
         { onConflict: 'user_id', ignoreDuplicates: true }
       )
+      if (upsertError) console.error('user_data upsert error:', upsertError)
 
-      await supabase.rpc('increment_points', {
-        p_user_id: user.id,
-        p_food: award.food_points,
-        p_knowledge: award.knowledge_points,
-        p_wood: award.wood_points,
-        p_total: earned,
+      const { error: rpcError } = await supabase.rpc('increment_points', {
+        p_user_id:    user.id,
+        p_food:       award.food_points,
+        p_knowledge:  award.knowledge_points,
+        p_wood:       award.wood_points,
+        p_total:      earned,
       })
+      if (rpcError) console.error('increment_points rpc error:', rpcError)
     }
 
     return new Response(
