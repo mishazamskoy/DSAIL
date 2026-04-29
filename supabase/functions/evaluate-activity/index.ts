@@ -130,21 +130,17 @@ Respond ONLY with valid JSON (no markdown, no extra text):
     if (logError) console.error('activity_logs insert error:', logError)
 
     if (earned > 0) {
-      // Ensure a user_data row exists before incrementing
-      const { error: upsertError } = await supabase.from('user_data').upsert(
-        { user_id: user.id },
-        { onConflict: 'user_id', ignoreDuplicates: true }
-      )
-      if (upsertError) console.error('user_data upsert error:', upsertError)
-
-      const { error: rpcError } = await supabase.rpc('increment_points', {
-        p_user_id:    user.id,
-        p_food:       award.food_points,
-        p_knowledge:  award.knowledge_points,
-        p_wood:       award.wood_points,
-        p_total:      earned,
+      // Atomic upsert: inserts a new user_data row or increments existing one.
+      // award_activity_points uses INSERT … ON CONFLICT DO UPDATE so it
+      // handles both cases in a single statement — no two-step race condition.
+      const { error: awardError } = await supabase.rpc('award_activity_points', {
+        p_user_id:   user.id,
+        p_food:      award.food_points,
+        p_knowledge: award.knowledge_points,
+        p_wood:      award.wood_points,
+        p_total:     earned,
       })
-      if (rpcError) console.error('increment_points rpc error:', rpcError)
+      if (awardError) console.error('award_activity_points error:', awardError)
     }
 
     return new Response(
