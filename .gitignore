@@ -10,3 +10,9 @@ dist/
 
 # misc
 .DS_Store
+
+# Supabase CLI temp files
+supabase/.temp/
+
+# Claude Code internal files
+.claude/worktrees/
